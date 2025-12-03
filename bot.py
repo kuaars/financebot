@@ -15,25 +15,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import database as db
 from config import BOT_TOKEN, CATEGORIES
 
-# Настройка matplotlib для работы без GUI
 matplotlib.use('Agg')
 
-# Конфигурация логирования
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Глобальные переменные для управления состоянием
-pending_expenses = []  # Временное хранение расходов перед выбором категории
-user_last_messages = {}  # ID последних сообщений для каждого пользователя
-user_waiting_for_category = {}  # Пользователи, ожидающие ввод категории
+pending_expenses = []
+user_last_messages = {}
+user_waiting_for_category = {}
 
-# Часовой пояс
 MSK_TIMEZONE = ZoneInfo("Europe/Moscow")
 
-# Текстовые константы для удобства поддержки
 TEXTS = {
     "start": "👋 Привет! Я помогу тебе учитывать личные расходы.\n\n💵 Просто введи сумму (например, 250) — и выбери категорию.",
     "main_menu": "📋 Главное меню:\n💵 Просто введи сумму (например, 250) — и выбери категорию.",
@@ -52,7 +46,6 @@ TEXTS = {
     "zero_amount": "❌ Сумма не должна быть равной нулю! Введите другую сумму:"
 }
 
-# Периоды для статистики
 PERIOD_NAMES = {
     "day": "день",
     "week": "неделю",
@@ -60,27 +53,21 @@ PERIOD_NAMES = {
     "year": "год"
 }
 
-
 async def delete_previous_messages(user_id: int):
-    """Удаляет предыдущие сообщения бота для пользователя"""
     if user_id in user_last_messages:
         for msg_id in user_last_messages[user_id]:
             try:
                 await bot.delete_message(chat_id=user_id, message_id=msg_id)
             except Exception:
-                pass  # Игнорируем ошибки удаления
+                pass
         user_last_messages[user_id] = []
 
-
 async def save_message_id(user_id: int, message_id: int):
-    """Сохраняет ID сообщения для последующего удаления"""
     if user_id not in user_last_messages:
         user_last_messages[user_id] = []
     user_last_messages[user_id].append(message_id)
 
-
 async def safe_edit_or_send(callback, text: str, reply_markup=None):
-    """Безопасно редактирует сообщение или отправляет новое при ошибке"""
     try:
         msg = await callback.message.edit_text(text, reply_markup=reply_markup)
     except Exception:
@@ -89,22 +76,12 @@ async def safe_edit_or_send(callback, text: str, reply_markup=None):
     await save_message_id(callback.from_user.id, msg.message_id)
     return msg
 
-
 async def safe_send_message(user_id: int, text: str, reply_markup=None):
-    """Безопасно отправляет сообщение с сохранением ID"""
     msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
     await save_message_id(user_id, msg.message_id)
     return msg
 
-
 def create_keyboard(buttons_config, adjust_count=1):
-    """
-    Создает инлайн-клавиатуру на основе конфигурации
-
-    Args:
-        buttons_config: список кортежей (текст, callback_data)
-        adjust_count: количество кнопок в строке
-    """
     builder = InlineKeyboardBuilder()
 
     for text, callback_data in buttons_config:
@@ -113,24 +90,18 @@ def create_keyboard(buttons_config, adjust_count=1):
     builder.adjust(adjust_count)
     return builder.as_markup()
 
-
 def main_menu():
-    """Главное меню"""
     buttons = [
         ("📊 Показать статистику", "stats_menu")
     ]
     return create_keyboard(buttons, 1)
 
-
 def category_menu():
-    """Меню выбора категории"""
     buttons = [(cat, f"cat:{cat}") for cat in CATEGORIES]
     buttons.append(("✏️ Своя категория", "custom_category"))
     return create_keyboard(buttons, 2)
 
-
 def stats_menu():
-    """Меню статистики"""
     buttons = [
         ("📅 За день", "stats:day"),
         ("🗓 За неделю", "stats:week"),
@@ -141,9 +112,7 @@ def stats_menu():
     ]
     return create_keyboard(buttons, 2)
 
-
 def reset_menu():
-    """Меню очистки статистики"""
     buttons = [
         ("📅 Очистить за день", "reset:day"),
         ("🗓 Очистить за неделю", "reset:week"),
@@ -153,26 +122,20 @@ def reset_menu():
     ]
     return create_keyboard(buttons, 2)
 
-
 def stats_result_menu(period: str):
-    """Меню результатов статистики"""
     buttons = [
         (f"📊 Диаграмма расходов", f"chart:{period}"),
         ("⬅️ Назад", "stats_menu")
     ]
     return create_keyboard(buttons, 1)
 
-
 def back_only_menu():
-    """Меню только с кнопкой Назад"""
     buttons = [
         ("⬅️ Назад", "stats_menu")
     ]
     return create_keyboard(buttons, 1)
 
-
 def format_expenses_list(expenses, period: str) -> str:
-    """Форматирует список расходов в читаемый текст"""
     if not expenses:
         return TEXTS["no_data"]
 
@@ -190,15 +153,7 @@ def format_expenses_list(expenses, period: str) -> str:
             + f"\n\n💰 Итого: {total:.2f} ₽"
     )
 
-
 def create_expense_chart(expenses, period: str, user_id: int) -> str:
-    """
-    Создает круговую диаграмму расходов и возвращает путь к файлу
-
-    Returns:
-        str: путь к созданному файлу с диаграммой
-    """
-    # Группируем расходы по категориям
     category_totals = defaultdict(float)
     for exp in expenses:
         category_totals[exp.category] += exp.amount
@@ -206,16 +161,13 @@ def create_expense_chart(expenses, period: str, user_id: int) -> str:
     labels = list(category_totals.keys())
     sizes = list(category_totals.values())
 
-    # Сортируем по убыванию для лучшего отображения
     sorted_data = sorted(zip(labels, sizes), key=lambda x: x[1], reverse=True)
     labels = [item[0] for item in sorted_data]
     sizes = [item[1] for item in sorted_data]
 
-    # Настройка графика
     colors = plt.cm.Set3(np.linspace(0, 1, len(labels)))
     fig, ax = plt.subplots(figsize=(16, 12))
 
-    # Создаем круговую диаграмму
     wedges, texts, autotexts = ax.pie(
         sizes,
         labels=None,
@@ -227,13 +179,11 @@ def create_expense_chart(expenses, period: str, user_id: int) -> str:
         pctdistance=0.8
     )
 
-    # Настраиваем отображение процентов
     for autotext in autotexts:
         autotext.set_fontweight('bold')
         autotext.set_fontsize(11)
         autotext.set_color('black')
 
-    # Создаем легенду
     legend_labels = [f"{label}\n{size:.2f} ₽" for label, size in zip(labels, sizes)]
     ax.legend(
         wedges,
@@ -250,7 +200,6 @@ def create_expense_chart(expenses, period: str, user_id: int) -> str:
 
     ax.axis("equal")
 
-    # Добавляем общую сумму в центр
     total = sum(sizes)
     centre_circle = plt.Circle((0, 0), 0.6, fc='white', edgecolor='gray', linewidth=2)
     fig.gca().add_artist(centre_circle)
@@ -260,48 +209,36 @@ def create_expense_chart(expenses, period: str, user_id: int) -> str:
     ax.text(0, -0.1, f"{total:.2f} ₽", ha='center', va='center',
             fontsize=18, fontweight='bold', color='darkgreen')
 
-    # Заголовок
     period_name = PERIOD_NAMES.get(period, period)
     plt.title(f"📊 ДИАГРАММА РАСХОДОВ\nЗА {period_name.upper()}",
               fontsize=18, fontweight='bold', pad=30, color='darkblue')
 
-    # Сохраняем график
     chart_path = f"chart_{user_id}.png"
     plt.savefig(chart_path, bbox_inches='tight', dpi=150, facecolor='white')
     plt.close(fig)
 
     return chart_path
 
-
-# ========== HANDLERS ==========
-
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    """Обработчик команды /start"""
     await delete_previous_messages(message.from_user.id)
     await db.init_db()
 
     msg = await message.answer(TEXTS["start"], reply_markup=main_menu())
     await save_message_id(message.from_user.id, msg.message_id)
 
-
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
-    """Возврат в главное меню"""
     await delete_previous_messages(callback.from_user.id)
     await safe_edit_or_send(callback, TEXTS["main_menu"], main_menu())
 
-
 @dp.callback_query(F.data == "add_expense")
 async def ask_amount(callback: types.CallbackQuery):
-    """Запрос суммы расхода"""
     await delete_previous_messages(callback.from_user.id)
     await safe_edit_or_send(callback, TEXTS["enter_amount"])
 
-
 @dp.message(F.text.regexp(r"^\d+(\.\d{1,2})?$"))
 async def get_amount(message: types.Message):
-    """Обработка введенной суммы"""
     await delete_previous_messages(message.from_user.id)
     user_id = message.from_user.id
     amount = float(message.text)
@@ -313,14 +250,11 @@ async def get_amount(message: types.Message):
     pending_expenses.append((user_id, amount))
     await safe_send_message(user_id, TEXTS["choose_category"], category_menu())
 
-
 @dp.callback_query(F.data == "custom_category")
 async def ask_custom_category(callback: types.CallbackQuery):
-    """Запрос пользовательской категории"""
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
 
-    # Ищем сумму для пользователя
     amount = next((amt for uid, amt in pending_expenses if uid == user_id), None)
 
     if amount is None:
@@ -330,10 +264,8 @@ async def ask_custom_category(callback: types.CallbackQuery):
     user_waiting_for_category[user_id] = amount
     await safe_edit_or_send(callback, TEXTS["custom_category_prompt"])
 
-
 @dp.message(F.text & ~F.text.regexp(r"^\d+(\.\d{1,2})?$"))
 async def get_custom_category(message: types.Message):
-    """Обработка пользовательской категории"""
     user_id = message.from_user.id
 
     if user_id not in user_waiting_for_category:
@@ -345,10 +277,8 @@ async def get_custom_category(message: types.Message):
     amount = user_waiting_for_category[user_id]
     del user_waiting_for_category[user_id]
 
-    # Удаляем сумму из временного хранилища
     pending_expenses[:] = [(uid, amt) for uid, amt in pending_expenses if not (uid == user_id and amt == amount)]
 
-    # Валидация категории
     if len(category) > 50:
         await safe_send_message(user_id, TEXTS["category_too_long"])
         user_waiting_for_category[user_id] = amount
@@ -359,7 +289,6 @@ async def get_custom_category(message: types.Message):
         user_waiting_for_category[user_id] = amount
         return
 
-    # Сохраняем расход
     await db.add_expense(user_id, amount, category)
 
     await safe_send_message(user_id, TEXTS["expense_added"].format(amount=amount, category=category))
@@ -368,15 +297,12 @@ async def get_custom_category(message: types.Message):
     await delete_previous_messages(user_id)
     await safe_send_message(user_id, TEXTS["main_menu"], main_menu())
 
-
 @dp.callback_query(F.data.startswith("cat:"))
 async def category_chosen(callback: types.CallbackQuery):
-    """Обработка выбора категории из списка"""
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     category = callback.data.split(":", 1)[1]
 
-    # Ищем и удаляем сумму из временного хранилища
     amount = None
     for idx, (uid, amt) in enumerate(pending_expenses):
         if uid == user_id:
@@ -404,17 +330,13 @@ async def category_chosen(callback: types.CallbackQuery):
         await save_message_id(user_id, msg1.message_id)
         await save_message_id(user_id, msg2.message_id)
 
-
 @dp.callback_query(F.data == "stats_menu")
 async def show_stats_menu(callback: types.CallbackQuery):
-    """Показать меню статистики"""
     await delete_previous_messages(callback.from_user.id)
     await safe_edit_or_send(callback, TEXTS["stats_period"], stats_menu())
 
-
 @dp.callback_query(F.data.startswith("stats:"))
 async def show_stats(callback: types.CallbackQuery):
-    """Показать статистику за период"""
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
@@ -424,25 +346,20 @@ async def show_stats(callback: types.CallbackQuery):
 
     await safe_edit_or_send(callback, text, stats_result_menu(period))
 
-
 @dp.callback_query(F.data.startswith("chart:"))
 async def show_chart(callback: types.CallbackQuery):
-    """Показать диаграмму расходов"""
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
 
     expenses = await db.get_expenses_by_period(user_id, period, MSK_TIMEZONE)
     if not expenses:
-        # ИЗМЕНЕНИЕ: Добавлена кнопка "назад" при отсутствии данных
         await safe_edit_or_send(callback, TEXTS["no_chart_data"], back_only_menu())
         return
 
-    # Создаем диаграмму
     chart_path = create_expense_chart(expenses, period, user_id)
     period_name = PERIOD_NAMES.get(period, period)
 
-    # Отправляем диаграмму
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад к статистике", callback_data=f"delete_chart:{period}:{user_id}")
 
@@ -455,26 +372,21 @@ async def show_chart(callback: types.CallbackQuery):
     await save_message_id(user_id, msg.message_id)
     await callback.answer()
 
-
 @dp.callback_query(F.data.startswith("delete_chart:"))
 async def delete_chart_and_back(callback: types.CallbackQuery):
-    """Удалить диаграмму и вернуться к статистике"""
     user_id = callback.from_user.id
     data_parts = callback.data.split(":")
     period = data_parts[1]
 
-    # Удаляем файл диаграммы
     chart_path = f"chart_{user_id}.png"
     if os.path.exists(chart_path):
         os.remove(chart_path)
 
-    # Удаляем сообщение с диаграммой
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    # Возвращаем к статистике
     await delete_previous_messages(user_id)
     expenses = await db.get_expenses_by_period(user_id, period, MSK_TIMEZONE)
     text = format_expenses_list(expenses, period)
@@ -482,17 +394,13 @@ async def delete_chart_and_back(callback: types.CallbackQuery):
     await safe_send_message(user_id, text, stats_result_menu(period))
     await callback.answer()
 
-
 @dp.callback_query(F.data == "reset_menu")
 async def show_reset_menu(callback: types.CallbackQuery):
-    """Показать меню очистки статистики"""
     await delete_previous_messages(callback.from_user.id)
     await safe_edit_or_send(callback, TEXTS["reset_period"], reset_menu())
 
-
 @dp.callback_query(F.data.startswith("reset:"))
 async def reset_stats_handler(callback: types.CallbackQuery):
-    """Очистка статистики за период"""
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
@@ -500,20 +408,15 @@ async def reset_stats_handler(callback: types.CallbackQuery):
     await db.reset_stats(user_id, period, MSK_TIMEZONE)
     await safe_edit_or_send(callback, TEXTS["stats_cleared"], stats_menu())
 
-
 @dp.error()
 async def error_handler(update: types.Update, exception: Exception):
-    """Обработчик ошибок"""
     logging.warning(f"Ошибка: {exception}")
     return True
 
-
 async def main():
-    """Основная функция запуска бота"""
     await db.init_db()
     logging.info("Бот запущен!")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
