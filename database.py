@@ -144,3 +144,4 @@ async def reset_stats(user_id: int, period: str, tz: ZoneInfo):
         )
         await session.execute(stmt)
         await session.commit()
+
