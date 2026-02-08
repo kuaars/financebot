@@ -256,3 +256,4 @@ def generate_expense_report(user_id: int, expenses, start_date: datetime, end_da
     doc.build(story)
 
     return filename
+
