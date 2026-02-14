@@ -36,7 +36,7 @@ cd password-manager
 ```
 2.Установите зависимости:
 ```bash
-pip install customtkinter pyperclip pycryptodome rsa
+pip install -r requirements.txt
 ```
 3.Запустите приложение:
 ```bash
