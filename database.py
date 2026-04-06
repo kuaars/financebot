@@ -56,7 +56,6 @@ async def add_expense(user_id: int, amount: float, category: str):
         await session.commit()
 
 async def delete_last_expense(user_id: int):
-    """Удаляет последний расход пользователя. Возвращает dict с amount/category или None."""
     async with AsyncSessionLocal() as session:
         stmt = select(Expense).where(
             Expense.user_id == user_id
@@ -72,7 +71,6 @@ async def delete_last_expense(user_id: int):
         return None
 
 async def get_user_timezone(user_id: int) -> str:
-    """Возвращает строку часового пояса пользователя, по умолчанию Europe/Moscow."""
     async with AsyncSessionLocal() as session:
         stmt = select(User).where(User.user_id == user_id)
         result = await session.execute(stmt)
@@ -82,7 +80,6 @@ async def get_user_timezone(user_id: int) -> str:
         return "Europe/Moscow"
 
 async def set_user_timezone(user_id: int, timezone: str):
-    """Сохраняет часовой пояс пользователя."""
     async with AsyncSessionLocal() as session:
         stmt = select(User).where(User.user_id == user_id)
         result = await session.execute(stmt)
