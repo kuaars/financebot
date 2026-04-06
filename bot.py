@@ -42,6 +42,7 @@ user_last_messages = {}
 user_report_state = {}
 user_confirmation_state = {}
 user_last_expense = {}
+user_date_state = {}
 
 MSK_TIMEZONE = ZoneInfo("Europe/Moscow")
 
@@ -75,10 +76,11 @@ TEXTS = {
     "nothing_to_cancel": "❌ Нет расхода для отмены.",
     "no_amount": "⚠️ Сначала введите сумму расхода!",
     "stats_period": "📊 Выберите период, за который показать статистику:",
+    "enter_date_for_stats": "📅 Введите дату в формате ДД.ММ.ГГГГ или ДД-ММ-ГГГГ\nНапример: 25.01.2025 или 25-01-2025",
     "report_menu": "📄 Выберите период для отчета (PDF):",
-    "enter_start_date": "📅 Введите начальную дату в формате ДД.ММ.ГГГГ\nНапример: 01.12.2024",
-    "enter_end_date": "📅 Введите конечную дату в формате ДД.ММ.ГГГГ\nНапример: 31.12.2024",
-    "invalid_date": "❌ Неверный формат даты! Используйте формат ДД.ММ.ГГГГ\nПопробуйте снова:",
+    "enter_start_date": "📅 Введите начальную дату в формате ДД.ММ.ГГГГ или ДД-ММ-ГГГГ\nНапример: 01.12.2024",
+    "enter_end_date": "📅 Введите конечную дату в формате ДД.ММ.ГГГГ или ДД-ММ-ГГГГ\nНапример: 31.12.2024",
+    "invalid_date": "❌ Неверный формат даты!\nИспользуйте ДД.ММ.ГГГГ или ДД-ММ-ГГГГ\nПопробуйте снова:",
     "date_range_error": "❌ Начальная дата должна быть раньше конечной!",
     "generating_report": "⏳ Генерирую отчет...",
     "report_sent": "✅ Отчет отправлен!",
@@ -143,6 +145,15 @@ async def safe_send_message(user_id: int, text: str, reply_markup=None):
         logging.error(f"Ошибка отправки сообщения: {e}")
         return None
 
+def parse_date_flexible(date_str: str, tz: ZoneInfo) -> datetime:
+    clean = date_str.strip().replace("-", ".")
+    try:
+        return datetime.strptime(clean, "%d.%m.%Y").replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=tz
+        )
+    except ValueError:
+        raise ValueError("Неверный формат даты")
+
 def create_keyboard(buttons_config, adjust_count=1):
     builder = InlineKeyboardBuilder()
     for text, callback_data in buttons_config:
@@ -151,9 +162,7 @@ def create_keyboard(buttons_config, adjust_count=1):
     return builder.as_markup()
 
 def main_menu():
-    buttons = [
-        ("📊 Показать статистику", "stats_menu"),
-    ]
+    buttons = [("📊 Показать статистику", "stats_menu")]
     return create_keyboard(buttons, 2)
 
 def category_menu():
@@ -170,12 +179,13 @@ def after_expense_menu():
 
 def stats_menu():
     buttons = [
-        ("📅 За день",            "stats:day"),
-        ("🗓 За неделю",          "stats:week"),
-        ("📈 За месяц",           "stats:month"),
-        ("📊 За год",             "stats:year"),
-        ("🗑 Очистить статистику", "reset_menu"),
-        ("⬅️ Назад",              "back_main")
+        ("📅 За день",              "stats:day"),
+        ("🗓 За неделю",            "stats:week"),
+        ("📈 За месяц",             "stats:month"),
+        ("📊 За год",               "stats:year"),
+        ("🔍 Конкретный день",      "stats:pick_date"),
+        ("🗑 Очистить статистику",  "reset_menu"),
+        ("⬅️ Назад",               "back_main"),
     ]
     return create_keyboard(buttons, 2)
 
@@ -186,24 +196,24 @@ def report_menu():
         ("📈 За месяц",            "report:month"),
         ("📊 За год",              "report:year"),
         ("📅 Произвольный период", "report:custom"),
-        ("⬅️ Назад",              "stats_menu")
+        ("⬅️ Назад",              "stats_menu"),
     ]
     return create_keyboard(buttons, 2)
 
 def reset_menu():
     buttons = [
-        ("📅 Очистить за день",    "reset:day"),
-        ("🗓 Очистить за неделю",  "reset:week"),
-        ("📈 Очистить за месяц",   "reset:month"),
-        ("📊 Очистить за год",     "reset:year"),
-        ("⬅️ Назад",              "stats_menu")
+        ("📅 Очистить за день",   "reset:day"),
+        ("🗓 Очистить за неделю", "reset:week"),
+        ("📈 Очистить за месяц",  "reset:month"),
+        ("📊 Очистить за год",    "reset:year"),
+        ("⬅️ Назад",             "stats_menu"),
     ]
     return create_keyboard(buttons, 2)
 
 def confirm_reset_menu(period: str):
     buttons = [
         ("✅ Подтвердить", f"confirm_reset:{period}"),
-        ("❌ Отменить",    "cancel_reset")
+        ("❌ Отменить",    "cancel_reset"),
     ]
     return create_keyboard(buttons, 2)
 
@@ -211,7 +221,13 @@ def stats_result_menu(period: str):
     buttons = [
         ("📊 Диаграмма расходов", f"chart:{period}"),
         ("📄 PDF отчет",          f"report:{period}"),
-        ("⬅️ Назад",              "stats_menu")
+        ("⬅️ Назад",              "stats_menu"),
+    ]
+    return create_keyboard(buttons, 1)
+
+def date_stats_result_menu(date_str: str):
+    buttons = [
+        ("⬅️ Назад", "stats_menu"),
     ]
     return create_keyboard(buttons, 1)
 
@@ -222,40 +238,42 @@ def timezone_menu():
 def format_expenses_list(expenses, period: str) -> str:
     if not expenses:
         return TEXTS["no_data"]
-
     total = sum(exp.amount for exp in expenses)
     period_name = PERIOD_NAMES.get(period, period)
-
     lines = [
         f"• {exp.category}: {exp.amount:.2f} ₽ ({exp.date.strftime('%d.%m.%Y %H:%M')})"
         for exp in expenses
     ]
-
     return (
         f"📊 Статистика за {period_name}:\n\n"
         + "\n".join(lines)
         + f"\n\n💰 Итого: {total:.2f} ₽"
     )
 
-def parse_date(date_str: str, tz: ZoneInfo) -> datetime:
-    try:
-        return datetime.strptime(date_str, "%d.%m.%Y").replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=tz
-        )
-    except ValueError:
-        raise ValueError("Неверный формат даты")
+def format_expenses_for_date(expenses, date: datetime) -> str:
+    if not expenses:
+        return TEXTS["no_data"]
+    total = sum(exp.amount for exp in expenses)
+    date_label = date.strftime("%d.%m.%Y")
+    lines = [
+        f"• {exp.category}: {exp.amount:.2f} ₽ ({exp.date.strftime('%H:%M')})"
+        for exp in expenses
+    ]
+    return (
+        f"📅 Расходы за {date_label}:\n\n"
+        + "\n".join(lines)
+        + f"\n\n💰 Итого: {total:.2f} ₽"
+    )
 
 def create_expense_chart(expenses, period: str, user_id: int) -> str:
     category_totals = defaultdict(float)
     for exp in expenses:
         category_totals[exp.category] += exp.amount
-
     if not category_totals:
         return None
 
     labels = list(category_totals.keys())
     sizes = list(category_totals.values())
-
     sorted_data = sorted(zip(labels, sizes), key=lambda x: x[1], reverse=True)
     labels = [item[0] for item in sorted_data]
     sizes = [item[1] for item in sorted_data]
@@ -273,35 +291,24 @@ def create_expense_chart(expenses, period: str, user_id: int) -> str:
         textprops=dict(fontsize=10, fontweight='bold'),
         pctdistance=0.75
     )
-
     for autotext in autotexts:
         autotext.set_color('black')
 
     legend_labels = [f"{label}: {size:.2f} ₽" for label, size in zip(labels, sizes)]
-    ax.legend(
-        wedges,
-        legend_labels,
-        title="Категории:",
-        loc="center left",
-        bbox_to_anchor=(1, 0, 0.5, 1),
-        fontsize=9
-    )
-
+    ax.legend(wedges, legend_labels, title="Категории:",
+              loc="center left", bbox_to_anchor=(1, 0, 0.5, 1), fontsize=9)
     ax.axis("equal")
 
     total = sum(sizes)
-    ax.text(0, 0, f"Всего:\n{total:.2f} ₽",
-            ha='center', va='center',
+    ax.text(0, 0, f"Всего:\n{total:.2f} ₽", ha='center', va='center',
             fontsize=12, fontweight='bold')
 
     period_name = PERIOD_NAMES.get(period, period)
-    plt.title(f"Диаграмма расходов за {period_name}",
-              fontsize=14, fontweight='bold', pad=20)
+    plt.title(f"Диаграмма расходов за {period_name}", fontsize=14, fontweight='bold', pad=20)
 
     chart_path = f"chart_{user_id}.png"
     plt.savefig(chart_path, bbox_inches='tight', dpi=100)
     plt.close(fig)
-
     return chart_path
 
 async def generate_pdf_report(user_id: int, period: str = None,
@@ -337,9 +344,7 @@ async def generate_pdf_report(user_id: int, period: str = None,
             if user_info.last_name:
                 username += f" {user_info.last_name}"
 
-    pdf_filename = generate_expense_report(
-        user_id, expenses, start_date, end_date, username
-    )
+    pdf_filename = generate_expense_report(user_id, expenses, start_date, end_date, username)
 
     if period:
         period_name = PERIOD_NAMES.get(period, period)
@@ -351,11 +356,8 @@ async def generate_pdf_report(user_id: int, period: str = None,
         with open(pdf_filename, 'rb') as pdf_file:
             pdf_data = pdf_file.read()
             input_file = BufferedInputFile(pdf_data, filename=filename)
-            await bot.send_document(
-                chat_id=user_id,
-                document=input_file,
-                caption=TEXTS["report_sent"]
-            )
+            await bot.send_document(chat_id=user_id, document=input_file,
+                                    caption=TEXTS["report_sent"])
     except Exception as e:
         logging.error(f"Ошибка отправки PDF: {e}")
         return False
@@ -371,18 +373,12 @@ async def generate_pdf_report(user_id: int, period: str = None,
 async def start_cmd(message: types.Message):
     await delete_previous_messages(message.from_user.id)
     await db.init_db()
-
     user = message.from_user
     try:
-        await db.update_user_info(
-            user_id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name
-        )
+        await db.update_user_info(user_id=user.id, username=user.username,
+                                  first_name=user.first_name, last_name=user.last_name)
     except Exception as e:
-        logging.error(f"Ошибка обновления информации о пользователе: {e}")
-
+        logging.error(f"Ошибка обновления пользователя: {e}")
     await safe_send_message(user.id, TEXTS["start"], main_menu())
 
 @dp.message(Command("timezone"))
@@ -399,151 +395,29 @@ async def back_main(callback: types.CallbackQuery):
 async def timezone_chosen(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     tz_str = callback.data[3:]
-
     tz_label = tz_str
     for label, tz in TIMEZONES:
         if tz == tz_str:
             tz_label = label
             break
-
     await db.set_user_timezone(user_id, tz_str)
     await delete_previous_messages(user_id)
-    await safe_edit_or_send(
-        callback,
-        TEXTS["timezone_saved"].format(tz_label=tz_label),
-        main_menu()
-    )
+    await safe_edit_or_send(callback, TEXTS["timezone_saved"].format(tz_label=tz_label), main_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "undo_expense")
 async def undo_expense(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     await delete_previous_messages(user_id)
-
     deleted = await db.delete_last_expense(user_id)
     user_last_expense.pop(user_id, None)
-
     if deleted:
         text = TEXTS["expense_cancelled"].format(
-            amount=deleted["amount"],
-            category=deleted["category"]
-        )
+            amount=deleted["amount"], category=deleted["category"])
     else:
         text = TEXTS["nothing_to_cancel"]
-
     await safe_edit_or_send(callback, text, main_menu())
     await callback.answer()
-
-@dp.message(F.text.regexp(r"^\d+(\.\d{1,2})?$"))
-async def get_amount(message: types.Message):
-    await delete_previous_messages(message.from_user.id)
-    user_id = message.from_user.id
-    amount = float(message.text)
-
-    if amount == 0:
-        await safe_send_message(user_id, TEXTS["zero_amount"])
-        return
-
-    pending_expenses[user_id] = amount
-    await safe_send_message(user_id, TEXTS["choose_category"], category_menu())
-
-@dp.callback_query(F.data == "custom_category")
-async def ask_custom_category(callback: types.CallbackQuery):
-    await delete_previous_messages(callback.from_user.id)
-    user_id = callback.from_user.id
-
-    if user_id not in pending_expenses:
-        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
-        return
-
-    await safe_edit_or_send(callback, TEXTS["custom_category_prompt"])
-
-@dp.callback_query(F.data.startswith("cat:"))
-async def category_chosen(callback: types.CallbackQuery):
-    await delete_previous_messages(callback.from_user.id)
-    user_id = callback.from_user.id
-    category = callback.data.split(":", 1)[1]
-
-    if user_id not in pending_expenses:
-        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
-        return
-
-    amount = pending_expenses.pop(user_id)
-    await db.add_expense(user_id, amount, category)
-    user_last_expense[user_id] = {"amount": amount, "category": category}
-
-    await safe_edit_or_send(
-        callback,
-        TEXTS["expense_added"].format(amount=amount, category=category),
-        after_expense_menu()
-    )
-
-@dp.message(F.text & ~F.text.regexp(r"^\d+(\.\d{1,2})?$"))
-async def handle_text_input(message: types.Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-
-    if user_id in pending_expenses:
-        await delete_previous_messages(user_id)
-
-        if len(text) > 50:
-            await safe_send_message(user_id, TEXTS["category_too_long"])
-            return
-
-        if len(text) < 2:
-            await safe_send_message(user_id, TEXTS["category_too_short"])
-            return
-
-        amount = pending_expenses.pop(user_id)
-        await db.add_expense(user_id, amount, text)
-        user_last_expense[user_id] = {"amount": amount, "category": text}
-
-        await safe_send_message(
-            user_id,
-            TEXTS["expense_added"].format(amount=amount, category=text),
-            after_expense_menu()
-        )
-
-    elif user_id in user_report_state:
-        state = user_report_state[user_id]
-        tz = await get_user_tz(user_id)
-
-        try:
-            date = parse_date(text, tz)
-
-            if state["step"] == "start":
-                user_report_state[user_id] = {
-                    "step": "end",
-                    "start_date": date
-                }
-                await safe_send_message(user_id, TEXTS["enter_end_date"])
-
-            else:
-                start_date = state["start_date"]
-                end_date = date
-
-                if start_date > end_date:
-                    await safe_send_message(user_id, TEXTS["date_range_error"])
-                    return
-
-                await delete_previous_messages(user_id)
-                await safe_send_message(user_id, TEXTS["generating_report"])
-
-                success = await generate_pdf_report(
-                    user_id,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-
-                if not success:
-                    await safe_send_message(user_id, TEXTS["no_data_report"])
-
-                del user_report_state[user_id]
-                await asyncio.sleep(1)
-                await safe_send_message(user_id, TEXTS["main_menu"], main_menu())
-
-        except ValueError:
-            await safe_send_message(user_id, TEXTS["invalid_date"])
 
 @dp.callback_query(F.data == "stats_menu")
 async def show_stats_menu(callback: types.CallbackQuery):
@@ -552,14 +426,19 @@ async def show_stats_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("stats:"))
 async def show_stats(callback: types.CallbackQuery):
-    await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
-    tz = await get_user_tz(user_id)
 
+    if period == "pick_date":
+        await delete_previous_messages(user_id)
+        user_date_state[user_id] = True
+        await safe_edit_or_send(callback, TEXTS["enter_date_for_stats"])
+        return
+
+    await delete_previous_messages(user_id)
+    tz = await get_user_tz(user_id)
     expenses = await db.get_expenses_by_period(user_id, period, tz)
     text = format_expenses_list(expenses, period)
-
     await safe_edit_or_send(callback, text, stats_result_menu(period))
 
 @dp.callback_query(F.data.startswith("chart:"))
@@ -580,7 +459,6 @@ async def show_chart(callback: types.CallbackQuery):
         return
 
     period_name = PERIOD_NAMES.get(period, period)
-
     builder = InlineKeyboardBuilder()
     builder.button(text="⬅️ Назад к статистике", callback_data=f"delete_chart:{period}")
 
@@ -591,12 +469,10 @@ async def show_chart(callback: types.CallbackQuery):
         reply_markup=builder.as_markup()
     )
     await save_message_id(user_id, msg.message_id)
-
     try:
         os.remove(chart_path)
     except Exception:
         pass
-
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete_chart:"))
@@ -604,16 +480,13 @@ async def delete_chart_and_back(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
     tz = await get_user_tz(user_id)
-
     try:
         await callback.message.delete()
     except Exception:
         pass
-
     await delete_previous_messages(user_id)
     expenses = await db.get_expenses_by_period(user_id, period, tz)
     text = format_expenses_list(expenses, period)
-
     await safe_send_message(user_id, text, stats_result_menu(period))
     await callback.answer()
 
@@ -630,18 +503,14 @@ async def handle_report_request(callback: types.CallbackQuery):
 
     if len(data) == 2:
         period = data[1]
-
         if period == "custom":
             user_report_state[user_id] = {"step": "start"}
             await safe_send_message(user_id, TEXTS["enter_start_date"])
         else:
             await safe_send_message(user_id, TEXTS["generating_report"])
-
             success = await generate_pdf_report(user_id, period)
-
             if not success:
                 await safe_send_message(user_id, TEXTS["no_data_report"])
-
             await asyncio.sleep(1)
             await safe_send_message(user_id, TEXTS["main_menu"], main_menu())
 
@@ -655,12 +524,9 @@ async def reset_stats_handler(callback: types.CallbackQuery):
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
-
     user_confirmation_state[user_id] = period
-
     period_name = PERIOD_NAMES.get(period, period)
     text = TEXTS["confirm_reset"].format(period=period_name)
-
     await safe_edit_or_send(callback, text, confirm_reset_menu(period))
 
 @dp.callback_query(F.data.startswith("confirm_reset:"))
@@ -669,13 +535,10 @@ async def confirm_reset_handler(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     period = callback.data.split(":")[1]
     tz = await get_user_tz(user_id)
-
     if user_id not in user_confirmation_state:
         await safe_edit_or_send(callback, TEXTS["error"], stats_menu())
         return
-
     del user_confirmation_state[user_id]
-
     await db.reset_stats(user_id, period, tz)
     await safe_edit_or_send(callback, TEXTS["stats_cleared"], stats_menu())
 
@@ -683,11 +546,110 @@ async def confirm_reset_handler(callback: types.CallbackQuery):
 async def cancel_reset_handler(callback: types.CallbackQuery):
     await delete_previous_messages(callback.from_user.id)
     user_id = callback.from_user.id
-
     if user_id in user_confirmation_state:
         del user_confirmation_state[user_id]
-
     await safe_edit_or_send(callback, TEXTS["reset_cancelled"], stats_menu())
+
+@dp.message(F.text.regexp(r"^\d+(\.\d{1,2})?$"))
+async def get_amount(message: types.Message):
+    await delete_previous_messages(message.from_user.id)
+    user_id = message.from_user.id
+    amount = float(message.text)
+    if amount == 0:
+        await safe_send_message(user_id, TEXTS["zero_amount"])
+        return
+    pending_expenses[user_id] = amount
+    await safe_send_message(user_id, TEXTS["choose_category"], category_menu())
+
+@dp.callback_query(F.data == "custom_category")
+async def ask_custom_category(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    if user_id not in pending_expenses:
+        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+        return
+    await safe_edit_or_send(callback, TEXTS["custom_category_prompt"])
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def category_chosen(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    category = callback.data.split(":", 1)[1]
+    if user_id not in pending_expenses:
+        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+        return
+    amount = pending_expenses.pop(user_id)
+    await db.add_expense(user_id, amount, category)
+    user_last_expense[user_id] = {"amount": amount, "category": category}
+    await safe_edit_or_send(
+        callback,
+        TEXTS["expense_added"].format(amount=amount, category=category),
+        after_expense_menu()
+    )
+
+@dp.message(F.text & ~F.text.regexp(r"^\d+(\.\d{1,2})?$"))
+async def handle_text_input(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    tz = await get_user_tz(user_id)
+
+    if user_id in pending_expenses:
+        await delete_previous_messages(user_id)
+        if len(text) > 50:
+            await safe_send_message(user_id, TEXTS["category_too_long"])
+            return
+        if len(text) < 2:
+            await safe_send_message(user_id, TEXTS["category_too_short"])
+            return
+        amount = pending_expenses.pop(user_id)
+        await db.add_expense(user_id, amount, text)
+        user_last_expense[user_id] = {"amount": amount, "category": text}
+        await safe_send_message(
+            user_id,
+            TEXTS["expense_added"].format(amount=amount, category=text),
+            after_expense_menu()
+        )
+
+    elif user_id in user_date_state:
+        await delete_previous_messages(user_id)
+        try:
+            date = parse_date_flexible(text, tz)
+        except ValueError:
+            await safe_send_message(user_id, TEXTS["invalid_date"])
+            return
+
+        day_start = date
+        day_end = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        expenses = await db.get_expenses_by_date_range(user_id, day_start, day_end)
+        result_text = format_expenses_for_date(expenses, date)
+
+        del user_date_state[user_id]
+        await safe_send_message(user_id, result_text, date_stats_result_menu(text))
+
+    elif user_id in user_report_state:
+        state = user_report_state[user_id]
+        try:
+            date = parse_date_flexible(text, tz)
+            if state["step"] == "start":
+                user_report_state[user_id] = {"step": "end", "start_date": date}
+                await safe_send_message(user_id, TEXTS["enter_end_date"])
+            else:
+                start_date = state["start_date"]
+                end_date = date
+                if start_date > end_date:
+                    await safe_send_message(user_id, TEXTS["date_range_error"])
+                    return
+                await delete_previous_messages(user_id)
+                await safe_send_message(user_id, TEXTS["generating_report"])
+                success = await generate_pdf_report(user_id, start_date=start_date, end_date=end_date)
+                if not success:
+                    await safe_send_message(user_id, TEXTS["no_data_report"])
+                del user_report_state[user_id]
+                await asyncio.sleep(1)
+                await safe_send_message(user_id, TEXTS["main_menu"], main_menu())
+        except ValueError:
+            await safe_send_message(user_id, TEXTS["invalid_date"])
 
 @dp.error()
 async def error_handler(exception: Exception):
@@ -697,7 +659,6 @@ async def error_handler(exception: Exception):
 async def main():
     await db.init_db()
     logging.info("Бот запущен!")
-
     try:
         await dp.start_polling(bot)
     except KeyboardInterrupt:
