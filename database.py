@@ -25,6 +25,7 @@ class User(Base):
     username = Column(String, nullable=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
+    timezone = Column(String, nullable=True, default="Europe/Moscow")
     created_at = Column(DateTime, default=datetime.utcnow)
 
 engine = create_async_engine(DB_URL, echo=False, future=True)
@@ -52,6 +53,45 @@ async def add_expense(user_id: int, amount: float, category: str):
             user = User(user_id=user_id)
             session.add(user)
 
+        await session.commit()
+
+async def delete_last_expense(user_id: int):
+    """Удаляет последний расход пользователя. Возвращает dict с amount/category или None."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(Expense).where(
+            Expense.user_id == user_id
+        ).order_by(Expense.date.desc()).limit(1)
+        result = await session.execute(stmt)
+        expense = result.scalar_one_or_none()
+        if expense:
+            amount = expense.amount
+            category = expense.category
+            await session.delete(expense)
+            await session.commit()
+            return {"amount": amount, "category": category}
+        return None
+
+async def get_user_timezone(user_id: int) -> str:
+    """Возвращает строку часового пояса пользователя, по умолчанию Europe/Moscow."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(User).where(User.user_id == user_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        if user and user.timezone:
+            return user.timezone
+        return "Europe/Moscow"
+
+async def set_user_timezone(user_id: int, timezone: str):
+    """Сохраняет часовой пояс пользователя."""
+    async with AsyncSessionLocal() as session:
+        stmt = select(User).where(User.user_id == user_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(user_id=user_id, timezone=timezone)
+            session.add(user)
+        else:
+            user.timezone = timezone
         await session.commit()
 
 async def get_expenses_by_period(user_id: int, period: str, tz: ZoneInfo):
@@ -144,4 +184,3 @@ async def reset_stats(user_id: int, period: str, tz: ZoneInfo):
         )
         await session.execute(stmt)
         await session.commit()
-
