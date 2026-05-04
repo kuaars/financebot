@@ -1,10 +1,12 @@
 import logging
 import logging.handlers
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import asyncio
+import calendar
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,6 +46,8 @@ user_confirmation_state = {}
 user_last_expense = {}
 user_date_state = {}
 
+user_recurring_state = {}
+
 MSK_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 TIMEZONES = [
@@ -61,13 +65,17 @@ TIMEZONES = [
     ("🌌 Камчатка (UTC+12)",                "Asia/Kamchatka"),
 ]
 
+WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+WEEKDAY_NAMES_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
 TEXTS = {
     "start": (
         "👋 Привет! Я помогу тебе учитывать личные расходы.\n\n"
-        "💵 Просто введи сумму (например, 250) — и выбери категорию.\n\n"
-        "🕐 Команда /timezone — настройка часового пояса."
+        "💵 Просто введи сумму — или фразу вроде «кофе 150», «300 такси».\n\n"
+        "🕐 /timezone — настройка часового пояса\n"
+        "🔁 /recurring — постоянные платежи"
     ),
-    "main_menu": "📋 Главное меню:\n💵 Просто введи сумму (например, 250) — и выбери категорию.",
+    "main_menu": "📋 Главное меню:\n💵 Введите сумму или фразу вроде «такси 300».",
     "enter_amount": "💰 Введите сумму расхода (в рублях):",
     "choose_category": "📂 Выберите категорию:",
     "custom_category_prompt": "✏️ Введите название своей категории расходов:\n\n💡 Например: Такси, Кафе, Кино, Подарок и т.д.",
@@ -97,6 +105,22 @@ TEXTS = {
     "error": "❌ Произошла ошибка. Попробуйте еще раз.",
     "choose_timezone": "🕐 Выберите ваш часовой пояс:",
     "timezone_saved": "✅ Часовой пояс сохранён:\n{tz_label}",
+    "recurring_menu": "🔁 <b>Постоянные платежи</b>\n\nАвтоматически вносятся в расходы в указанный день месяца с напоминанием.",
+    "recurring_empty": "У вас пока нет постоянных платежей.\nДобавьте первый кнопкой ниже.",
+    "recurring_add_name": "📝 Введите название платежа:\n\nНапример: Горячая вода, Аренда, Интернет",
+    "recurring_add_amount": "💰 Введите сумму платежа (в рублях):",
+    "recurring_add_day": "📅 В какой день месяца вносить? (1-28)\n\nНапример: 22",
+    "recurring_add_category": "📂 Выберите категорию для этого платежа:",
+    "recurring_added": "✅ Постоянный платёж добавлен!\n\n📌 <b>{name}</b>\n💰 {amount:.2f} ₽\n📂 {category}\n📅 {day}-го числа каждого месяца",
+    "recurring_deleted": "🗑 Платёж «{name}» удалён.",
+    "recurring_invalid_day": "❌ День должен быть от 1 до 28. Введите снова:",
+    "recurring_reminder": (
+        "🔔 <b>Напоминание о постоянном платеже!</b>\n\n"
+        "📌 {name}\n"
+        "💰 {amount:.2f} ₽\n"
+        "📂 {category}\n\n"
+        "Расход автоматически добавлен в статистику."
+    ),
 }
 
 PERIOD_NAMES = {
@@ -105,6 +129,30 @@ PERIOD_NAMES = {
     "month": "месяц",
     "year": "год"
 }
+
+def smart_parse_expense(text: str):
+    text = text.strip()
+
+    amount_pattern = r'(\d+(?:[.,]\d{1,2})?)\s*(?:р(?:уб)?|₽)?'
+
+    match = re.search(amount_pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+
+    amount_str = match.group(1).replace(',', '.')
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        return None
+
+    if amount <= 0:
+        return None
+
+    leftover = text[:match.start()].strip() + " " + text[match.end():].strip()
+    leftover = re.sub(r'[^\w\s]', '', leftover).strip()
+
+    category_hint = leftover if len(leftover) >= 2 else None
+    return amount, category_hint
 
 async def get_user_tz(user_id: int) -> ZoneInfo:
     tz_str = await db.get_user_timezone(user_id)
@@ -162,19 +210,36 @@ def create_keyboard(buttons_config, adjust_count=1):
     return builder.as_markup()
 
 def main_menu():
-    buttons = [("📊 Показать статистику", "stats_menu")]
+    buttons = [("📊 Статистика", "stats_menu"),
+               ("🔁 Платежи", "recurring_menu")]
     return create_keyboard(buttons, 2)
 
-def category_menu():
+def quick_amount_menu(category_hint: str = None):
+    builder = InlineKeyboardBuilder()
+    quick_amounts = [50, 100, 200, 500, 1000, 2000]
+    for a in quick_amounts:
+        builder.button(text=f"{a} ₽", callback_data=f"quick_amount:{a}")
+    builder.adjust(3)
+    if category_hint:
+        builder.button(text=f'✅ Категория: {category_hint[:20]}', callback_data=f"hint_cat:{category_hint[:50]}")
+        builder.adjust(3, 1)
+    return builder.as_markup()
+
+def category_menu(show_quick: bool = False):
     buttons = [(cat, f"cat:{cat}") for cat in CATEGORIES]
     buttons.append(("✏️ Своя категория", "custom_category"))
     return create_keyboard(buttons, 2)
 
-def after_expense_menu():
-    buttons = [
-        ("↩️ Отменить расход", "undo_expense"),
-        ("📋 Главное меню",    "back_main"),
-    ]
+def category_menu_for_recurring():
+    buttons = [(cat, f"rcat:{cat}") for cat in CATEGORIES]
+    buttons.append(("✏️ Своя категория", "rcat_custom"))
+    return create_keyboard(buttons, 2)
+
+def after_expense_menu(has_last: bool = False):
+    buttons = [("↩️ Отменить расход", "undo_expense")]
+    if has_last:
+        buttons.append(("🔄 Повторить", "repeat_expense"))
+    buttons.append(("📋 Главное меню", "back_main"))
     return create_keyboard(buttons, 2)
 
 def stats_menu():
@@ -183,9 +248,21 @@ def stats_menu():
         ("🗓 За неделю",            "stats:week"),
         ("📈 За месяц",             "stats:month"),
         ("📊 За год",               "stats:year"),
-        ("🔍 Конкретный день",      "stats:pick_date"),
-        ("🗑 Очистить статистику",  "reset_menu"),
+        ("🔍 Выбрать день",         "stats:pick_date"),
+        ("📉 Сравнение периодов",   "compare_menu"),
+        ("🏆 Топ категорий",        "top_categories"),
+        ("📆 По дням недели",       "weekday_stats"),
+        ("🗑 Очистить",             "reset_menu"),
         ("⬅️ Назад",               "back_main"),
+    ]
+    return create_keyboard(buttons, 2)
+
+def compare_menu():
+    buttons = [
+        ("📅 День vs вчера",       "compare:day"),
+        ("🗓 Неделя vs прошлая",   "compare:week"),
+        ("📈 Месяц vs прошлый",    "compare:month"),
+        ("⬅️ Назад",              "stats_menu"),
     ]
     return create_keyboard(buttons, 2)
 
@@ -226,13 +303,30 @@ def stats_result_menu(period: str):
     return create_keyboard(buttons, 1)
 
 def date_stats_result_menu(date_str: str):
-    buttons = [
-        ("⬅️ Назад", "stats_menu"),
-    ]
+    buttons = [("⬅️ Назад", "stats_menu")]
     return create_keyboard(buttons, 1)
 
 def timezone_menu():
     buttons = [(label, f"tz:{tz}") for label, tz in TIMEZONES]
+    return create_keyboard(buttons, 1)
+
+def recurring_list_menu(payments: list):
+    builder = InlineKeyboardBuilder()
+    for p in payments:
+        builder.button(
+            text=f"🗑 {p.name} ({p.day_of_month}-го, {p.amount:.0f}₽)",
+            callback_data=f"del_recurring:{p.id}"
+        )
+    builder.button(text="➕ Добавить платёж", callback_data="add_recurring")
+    builder.button(text="⬅️ Назад", callback_data="back_main")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def recurring_empty_menu():
+    buttons = [
+        ("➕ Добавить платёж", "add_recurring"),
+        ("⬅️ Назад", "back_main"),
+    ]
     return create_keyboard(buttons, 1)
 
 def format_expenses_list(expenses, period: str) -> str:
@@ -263,6 +357,68 @@ def format_expenses_for_date(expenses, date: datetime) -> str:
         f"📅 Расходы за {date_label}:\n\n"
         + "\n".join(lines)
         + f"\n\n💰 Итого: {total:.2f} ₽"
+    )
+
+def format_comparison(period: str, cur: float, prev: float) -> str:
+    period_labels = {
+        "day":   ("сегодня", "вчера"),
+        "week":  ("эта неделя", "прошлая неделя"),
+        "month": ("этот месяц", "прошлый месяц"),
+    }
+    cur_label, prev_label = period_labels.get(period, ("текущий", "предыдущий"))
+
+    if prev == 0:
+        if cur == 0:
+            diff_str = "Нет данных за оба периода."
+        else:
+            diff_str = "За предыдущий период расходов не было."
+    else:
+        diff = cur - prev
+        pct = abs(diff) / prev * 100
+        arrow = "📈 больше" if diff > 0 else "📉 меньше"
+        diff_str = f"На {abs(diff):.2f} ₽ ({pct:.1f}%) {arrow}, чем {prev_label}."
+
+    return (
+        f"📊 <b>Сравнение расходов</b>\n\n"
+        f"🔵 {cur_label.capitalize()}: <b>{cur:.2f} ₽</b>\n"
+        f"⚪ {prev_label.capitalize()}: <b>{prev:.2f} ₽</b>\n\n"
+        f"{diff_str}"
+    )
+
+def format_top_categories(totals: dict, period_label: str) -> str:
+    if not totals:
+        return TEXTS["no_data"]
+    sorted_cats = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    total = sum(totals.values())
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (cat, amt) in enumerate(sorted_cats):
+        medal = medals[i] if i < 3 else f"{i+1}."
+        pct = amt / total * 100
+        lines.append(f"{medal} {cat}: {amt:.2f} ₽ ({pct:.1f}%)")
+    return (
+        f"🏆 <b>Топ категорий за {period_label}</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\n💰 Итого: {total:.2f} ₽"
+    )
+
+def format_weekday_stats(totals: dict) -> str:
+    max_val = max(totals.values()) if any(totals.values()) else 1
+    lines = []
+    for wd in range(7):
+        amt = totals[wd]
+        bar_len = int(amt / max_val * 10) if max_val > 0 else 0
+        bar = "█" * bar_len + "░" * (10 - bar_len)
+        lines.append(f"{WEEKDAY_NAMES[wd]}: {bar} {amt:.0f} ₽")
+    total = sum(totals.values())
+    if total == 0:
+        return TEXTS["no_data"]
+    best_day = max(totals, key=totals.get)
+    return (
+        f"📆 <b>Расходы по дням недели (месяц)</b>\n\n"
+        + "<code>" + "\n".join(lines) + "</code>"
+        + f"\n\n🔥 Самый затратный день: <b>{WEEKDAY_NAMES_FULL[best_day]}</b>\n"
+        f"💰 Всего: {total:.2f} ₽"
     )
 
 def create_expense_chart(expenses, period: str, user_id: int) -> str:
@@ -386,6 +542,11 @@ async def timezone_cmd(message: types.Message):
     await delete_previous_messages(message.from_user.id)
     await safe_send_message(message.from_user.id, TEXTS["choose_timezone"], timezone_menu())
 
+@dp.message(Command("recurring"))
+async def recurring_cmd(message: types.Message):
+    await delete_previous_messages(message.from_user.id)
+    await show_recurring_list(message.from_user.id)
+
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
     await delete_previous_messages(callback.from_user.id)
@@ -405,6 +566,34 @@ async def timezone_chosen(callback: types.CallbackQuery):
     await safe_edit_or_send(callback, TEXTS["timezone_saved"].format(tz_label=tz_label), main_menu())
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("quick_amount:"))
+async def quick_amount_chosen(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    amount = float(callback.data.split(":")[1])
+    pending_expenses[user_id] = amount
+    await safe_edit_or_send(callback, TEXTS["choose_category"], category_menu())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("hint_cat:"))
+async def hint_category_chosen(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    category = callback.data.split(":", 1)[1]
+    if user_id not in pending_expenses:
+        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+        return
+    amount = pending_expenses.pop(user_id)
+    await db.add_expense(user_id, amount, category)
+    user_last_expense[user_id] = {"amount": amount, "category": category}
+    has_last = user_id in user_last_expense
+    await safe_edit_or_send(
+        callback,
+        TEXTS["expense_added"].format(amount=amount, category=category),
+        after_expense_menu(has_last=True)
+    )
+    await callback.answer()
+
 @dp.callback_query(F.data == "undo_expense")
 async def undo_expense(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -417,6 +606,52 @@ async def undo_expense(callback: types.CallbackQuery):
     else:
         text = TEXTS["nothing_to_cancel"]
     await safe_edit_or_send(callback, text, main_menu())
+    await callback.answer()
+
+@dp.callback_query(F.data == "repeat_expense")
+async def repeat_expense(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await delete_previous_messages(user_id)
+    last = user_last_expense.get(user_id)
+    if not last:
+        await safe_edit_or_send(callback, "❌ Нет предыдущего расхода для повтора.", main_menu())
+        await callback.answer()
+        return
+    amount = last["amount"]
+    category = last["category"]
+    await db.add_expense(user_id, amount, category)
+    await safe_edit_or_send(
+        callback,
+        f"🔄 Повторён расход: {amount:.2f} ₽ → «{category}»",
+        after_expense_menu(has_last=True)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "custom_category")
+async def ask_custom_category(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    if user_id not in pending_expenses:
+        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+        return
+    await safe_edit_or_send(callback, TEXTS["custom_category_prompt"])
+
+@dp.callback_query(F.data.startswith("cat:"))
+async def category_chosen(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    user_id = callback.from_user.id
+    category = callback.data.split(":", 1)[1]
+    if user_id not in pending_expenses:
+        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+        return
+    amount = pending_expenses.pop(user_id)
+    await db.add_expense(user_id, amount, category)
+    user_last_expense[user_id] = {"amount": amount, "category": category}
+    await safe_edit_or_send(
+        callback,
+        TEXTS["expense_added"].format(amount=amount, category=category),
+        after_expense_menu(has_last=True)
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "stats_menu")
@@ -440,6 +675,74 @@ async def show_stats(callback: types.CallbackQuery):
     expenses = await db.get_expenses_by_period(user_id, period, tz)
     text = format_expenses_list(expenses, period)
     await safe_edit_or_send(callback, text, stats_result_menu(period))
+
+@dp.callback_query(F.data == "compare_menu")
+async def show_compare_menu(callback: types.CallbackQuery):
+    await delete_previous_messages(callback.from_user.id)
+    await safe_edit_or_send(callback, "📊 Выберите период для сравнения:", compare_menu())
+
+@dp.callback_query(F.data.startswith("compare:"))
+async def show_comparison(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    period = callback.data.split(":")[1]
+    tz = await get_user_tz(user_id)
+    now = datetime.now(tz)
+
+    if period == "day":
+        cur_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        cur_end = now
+        prev_start = cur_start - timedelta(days=1)
+        prev_end = cur_start - timedelta(seconds=1)
+    elif period == "week":
+        cur_start = now - timedelta(days=now.weekday())
+        cur_start = cur_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        cur_end = now
+        prev_start = cur_start - timedelta(weeks=1)
+        prev_end = cur_start - timedelta(seconds=1)
+    elif period == "month":
+        cur_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        cur_end = now
+        prev_month_end = cur_start - timedelta(seconds=1)
+        prev_start = prev_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        prev_end = prev_month_end
+    else:
+        await callback.answer()
+        return
+
+    cur_total = await db.get_period_total(user_id, cur_start, cur_end)
+    prev_total = await db.get_period_total(user_id, prev_start, prev_end)
+
+    text = format_comparison(period, cur_total, prev_total)
+    back_kb = create_keyboard([("⬅️ Назад", "compare_menu")], 1)
+    await delete_previous_messages(user_id)
+    await safe_edit_or_send(callback, text, back_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "top_categories")
+async def show_top_categories(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    tz = await get_user_tz(user_id)
+    now = datetime.now(tz)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    totals = await db.get_category_totals(user_id, start, now)
+    text = format_top_categories(totals, "месяц")
+    back_kb = create_keyboard([("⬅️ Назад", "stats_menu")], 1)
+    await delete_previous_messages(user_id)
+    await safe_edit_or_send(callback, text, back_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "weekday_stats")
+async def show_weekday_stats(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    tz = await get_user_tz(user_id)
+    now = datetime.now(tz)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    totals = await db.get_weekday_totals(user_id, start, now)
+    text = format_weekday_stats(totals)
+    back_kb = create_keyboard([("⬅️ Назад", "stats_menu")], 1)
+    await delete_previous_messages(user_id)
+    await safe_edit_or_send(callback, text, back_kb)
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("chart:"))
 async def show_chart(callback: types.CallbackQuery):
@@ -550,48 +853,172 @@ async def cancel_reset_handler(callback: types.CallbackQuery):
         del user_confirmation_state[user_id]
     await safe_edit_or_send(callback, TEXTS["reset_cancelled"], stats_menu())
 
-@dp.message(F.text.regexp(r"^\d+(\.\d{1,2})?$"))
-async def get_amount(message: types.Message):
-    await delete_previous_messages(message.from_user.id)
-    user_id = message.from_user.id
-    amount = float(message.text)
-    if amount == 0:
-        await safe_send_message(user_id, TEXTS["zero_amount"])
-        return
-    pending_expenses[user_id] = amount
-    await safe_send_message(user_id, TEXTS["choose_category"], category_menu())
+async def show_recurring_list(user_id: int, edit_callback: types.CallbackQuery = None):
+    payments = await db.get_recurring_payments(user_id)
+    if payments:
+        lines = []
+        for p in payments:
+            lines.append(f"📌 <b>{p.name}</b> — {p.amount:.0f} ₽, {p.day_of_month}-го числа, категория: {p.category}")
+        text = TEXTS["recurring_menu"] + "\n\n" + "\n".join(lines)
+        kb = recurring_list_menu(payments)
+    else:
+        text = TEXTS["recurring_menu"] + "\n\n" + TEXTS["recurring_empty"]
+        kb = recurring_empty_menu()
 
-@dp.callback_query(F.data == "custom_category")
-async def ask_custom_category(callback: types.CallbackQuery):
+    if edit_callback:
+        await safe_edit_or_send(edit_callback, text, kb)
+    else:
+        await safe_send_message(user_id, text, kb)
+
+@dp.callback_query(F.data == "recurring_menu")
+async def recurring_menu_handler(callback: types.CallbackQuery):
     await delete_previous_messages(callback.from_user.id)
+    await show_recurring_list(callback.from_user.id, edit_callback=callback)
+    await callback.answer()
+
+@dp.callback_query(F.data == "add_recurring")
+async def add_recurring_start(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    if user_id not in pending_expenses:
-        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
-        return
-    await safe_edit_or_send(callback, TEXTS["custom_category_prompt"])
+    await delete_previous_messages(user_id)
+    user_recurring_state[user_id] = {"step": "name"}
+    await safe_edit_or_send(callback, TEXTS["recurring_add_name"])
+    await callback.answer()
 
-@dp.callback_query(F.data.startswith("cat:"))
-async def category_chosen(callback: types.CallbackQuery):
-    await delete_previous_messages(callback.from_user.id)
+@dp.callback_query(F.data.startswith("rcat:"))
+async def recurring_category_chosen(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     category = callback.data.split(":", 1)[1]
-    if user_id not in pending_expenses:
-        await safe_send_message(user_id, TEXTS["no_amount"], main_menu())
+    state = user_recurring_state.get(user_id, {})
+    if state.get("step") != "category":
+        await callback.answer()
         return
-    amount = pending_expenses.pop(user_id)
-    await db.add_expense(user_id, amount, category)
-    user_last_expense[user_id] = {"amount": amount, "category": category}
-    await safe_edit_or_send(
-        callback,
-        TEXTS["expense_added"].format(amount=amount, category=category),
-        after_expense_menu()
-    )
+    state["category"] = category
+    state["step"] = "day"
+    await delete_previous_messages(user_id)
+    await safe_edit_or_send(callback, TEXTS["recurring_add_day"])
+    await callback.answer()
 
-@dp.message(F.text & ~F.text.regexp(r"^\d+(\.\d{1,2})?$"))
-async def handle_text_input(message: types.Message):
+@dp.callback_query(F.data == "rcat_custom")
+async def recurring_custom_category(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_recurring_state.get(user_id, {})
+    if state.get("step") != "category":
+        await callback.answer()
+        return
+    state["step"] = "category_custom"
+    await delete_previous_messages(user_id)
+    await safe_edit_or_send(callback, "✏️ Введите название категории для этого платежа:")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("del_recurring:"))
+async def delete_recurring_handler(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    payment_id = int(callback.data.split(":")[1])
+    payments = await db.get_recurring_payments(user_id)
+    payment = next((p for p in payments if p.id == payment_id), None)
+    name = payment.name if payment else "?"
+    deleted = await db.delete_recurring_payment(payment_id, user_id)
+    if deleted:
+        await callback.answer(f"Платёж «{name}» удалён", show_alert=False)
+    await delete_previous_messages(user_id)
+    await show_recurring_list(user_id, edit_callback=callback)
+
+async def recurring_payments_scheduler():
+    while True:
+        try:
+            now_utc = datetime.utcnow()
+            due = await db.get_due_recurring_payments(now_utc)
+            for payment in due:
+                try:
+                    await db.add_expense(payment.user_id, payment.amount, payment.category)
+                    await db.mark_recurring_triggered(payment.id, now_utc)
+                    text = TEXTS["recurring_reminder"].format(
+                        name=payment.name,
+                        amount=payment.amount,
+                        category=payment.category,
+                    )
+                    await safe_send_message(payment.user_id, text, main_menu())
+                    logging.info(
+                        f"Регулярный платёж #{payment.id} «{payment.name}» "
+                        f"пользователя {payment.user_id} выполнен."
+                    )
+                except Exception as e:
+                    logging.error(f"Ошибка выполнения регулярного платежа #{payment.id}: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка в планировщике: {e}")
+
+        await asyncio.sleep(3600)
+
+@dp.message(F.text)
+async def handle_all_text(message: types.Message):
     user_id = message.from_user.id
     text = message.text.strip()
     tz = await get_user_tz(user_id)
+
+    if user_id in user_recurring_state:
+        state = user_recurring_state[user_id]
+        step = state.get("step")
+
+        if step == "name":
+            if len(text) < 2:
+                await safe_send_message(user_id, "❌ Слишком короткое название. Введите минимум 2 символа:")
+                return
+            if len(text) > 50:
+                await safe_send_message(user_id, "❌ Слишком длинное название (макс. 50 символов):")
+                return
+            state["name"] = text
+            state["step"] = "amount"
+            await delete_previous_messages(user_id)
+            await safe_send_message(user_id, TEXTS["recurring_add_amount"])
+            return
+
+        elif step == "amount":
+            try:
+                amount = float(text.replace(',', '.'))
+                if amount <= 0:
+                    raise ValueError
+            except ValueError:
+                await safe_send_message(user_id, "❌ Введите корректную сумму (число больше 0):")
+                return
+            state["amount"] = amount
+            state["step"] = "category"
+            await delete_previous_messages(user_id)
+            await safe_send_message(user_id, TEXTS["recurring_add_category"], category_menu_for_recurring())
+            return
+
+        elif step == "category_custom":
+            if len(text) < 2:
+                await safe_send_message(user_id, TEXTS["category_too_short"])
+                return
+            if len(text) > 50:
+                await safe_send_message(user_id, TEXTS["category_too_long"])
+                return
+            state["category"] = text
+            state["step"] = "day"
+            await delete_previous_messages(user_id)
+            await safe_send_message(user_id, TEXTS["recurring_add_day"])
+            return
+
+        elif step == "day":
+            try:
+                day = int(text)
+                if not 1 <= day <= 28:
+                    raise ValueError
+            except ValueError:
+                await safe_send_message(user_id, TEXTS["recurring_invalid_day"])
+                return
+            name = state["name"]
+            amount = state["amount"]
+            category = state["category"]
+            del user_recurring_state[user_id]
+            await db.add_recurring_payment(user_id, name, amount, category, day)
+            await delete_previous_messages(user_id)
+            await safe_send_message(
+                user_id,
+                TEXTS["recurring_added"].format(name=name, amount=amount, category=category, day=day),
+                main_menu()
+            )
+            return
 
     if user_id in pending_expenses:
         await delete_previous_messages(user_id)
@@ -607,27 +1034,26 @@ async def handle_text_input(message: types.Message):
         await safe_send_message(
             user_id,
             TEXTS["expense_added"].format(amount=amount, category=text),
-            after_expense_menu()
+            after_expense_menu(has_last=True)
         )
+        return
 
-    elif user_id in user_date_state:
+    if user_id in user_date_state:
         await delete_previous_messages(user_id)
         try:
             date = parse_date_flexible(text, tz)
         except ValueError:
             await safe_send_message(user_id, TEXTS["invalid_date"])
             return
-
         day_start = date
         day_end = date.replace(hour=23, minute=59, second=59, microsecond=999999)
-
         expenses = await db.get_expenses_by_date_range(user_id, day_start, day_end)
         result_text = format_expenses_for_date(expenses, date)
-
         del user_date_state[user_id]
         await safe_send_message(user_id, result_text, date_stats_result_menu(text))
+        return
 
-    elif user_id in user_report_state:
+    if user_id in user_report_state:
         state = user_report_state[user_id]
         try:
             date = parse_date_flexible(text, tz)
@@ -650,6 +1076,65 @@ async def handle_text_input(message: types.Message):
                 await safe_send_message(user_id, TEXTS["main_menu"], main_menu())
         except ValueError:
             await safe_send_message(user_id, TEXTS["invalid_date"])
+        return
+
+    await delete_previous_messages(user_id)
+
+    pure_number = re.match(r'^(\d+(?:[.,]\d{1,2})?)(?:\s*(?:р(?:уб)?|₽))?$', text)
+    if pure_number:
+        amount = float(pure_number.group(1).replace(',', '.'))
+        if amount == 0:
+            await safe_send_message(user_id, TEXTS["zero_amount"])
+            return
+        pending_expenses[user_id] = amount
+        await safe_send_message(user_id, TEXTS["choose_category"], category_menu())
+        return
+
+    parsed = smart_parse_expense(text)
+    if parsed:
+        amount, category_hint = parsed
+        pending_expenses[user_id] = amount
+
+        if category_hint:
+            matched_cat = None
+            for cat in CATEGORIES:
+                if cat.lower() in category_hint.lower() or category_hint.lower() in cat.lower():
+                    matched_cat = cat
+                    break
+
+            if matched_cat:
+                amount = pending_expenses.pop(user_id)
+                await db.add_expense(user_id, amount, matched_cat)
+                user_last_expense[user_id] = {"amount": amount, "category": matched_cat}
+                await safe_send_message(
+                    user_id,
+                    f"✅ Добавлено: <b>{amount:.2f} ₽</b> → «{matched_cat}»\n"
+                    f"(распознано из: «{text}»)",
+                    after_expense_menu(has_last=True)
+                )
+            else:
+                hint_text = (
+                    f"💰 Сумма: <b>{amount:.2f} ₽</b>\n"
+                    f"💡 Возможная категория: «{category_hint}»\n\n"
+                    f"Выберите категорию или нажмите на подсказку:"
+                )
+
+                builder = InlineKeyboardBuilder()
+                builder.button(text=f'✅ «{category_hint[:25]}»', callback_data=f"hint_cat:{category_hint[:50]}")
+                for cat in CATEGORIES:
+                    builder.button(text=cat, callback_data=f"cat:{cat}")
+                builder.button(text="✏️ Своя категория", callback_data="custom_category")
+                builder.adjust(1, 2, 2, 1)
+                await safe_send_message(user_id, hint_text, builder.as_markup())
+        else:
+            hint_text = f"💰 Сумма: <b>{amount:.2f} ₽</b>\n\nВыберите категорию:"
+            await safe_send_message(user_id, hint_text, category_menu())
+    else:
+        await safe_send_message(
+            user_id,
+            "💰 Выберите сумму или введите число:",
+            quick_amount_menu()
+        )
 
 @dp.error()
 async def error_handler(exception: Exception):
@@ -659,6 +1144,7 @@ async def error_handler(exception: Exception):
 async def main():
     await db.init_db()
     logging.info("Бот запущен!")
+    asyncio.create_task(recurring_payments_scheduler())
     try:
         await dp.start_polling(bot)
     except KeyboardInterrupt:
